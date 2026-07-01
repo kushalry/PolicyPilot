@@ -1,0 +1,35 @@
+cd ~/Downloads/policypilot
+
+cat > .gitignore << 'EOF'
+# Maven build output
+target/
+*.class
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# Logs
+*.log
+logs/
+/tmp/spring.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets — never commit
+.env
+*.env
+application-local.yml
+application-secrets.yml
+
+# Local data & runtime
+data/
+*.pdf
+!README-images/*.pdf
+EOF

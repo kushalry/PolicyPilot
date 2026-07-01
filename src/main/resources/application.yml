@@ -1,0 +1,61 @@
+spring:
+  application:
+    name: policypilot
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/policypilot
+    username: pilot
+    password: pilot
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      timeout: 2000ms
+
+  servlet:
+    multipart:
+      max-file-size: 25MB
+      max-request-size: 25MB
+
+  ai:
+    openai:
+      # Export OPENAI_API_KEY before running. Never commit the key.
+      api-key: ${OPENAI_API_KEY}
+      chat:
+        options:
+          model: gpt-4o-mini # cheap, fast, good enough for RAG
+          temperature: 0.2 # low temp for factual policy answers
+          max-tokens: 800
+      embedding:
+        options:
+          model: text-embedding-3-small # 1536 dims, $0.02 / 1M tokens
+    vectorstore:
+      pgvector:
+        index-type: HNSW # approximate nearest-neighbor index
+        distance-type: COSINE_DISTANCE
+        dimensions: 1536 # MUST match embedding model
+        initialize-schema: true # auto-creates vector_store table on boot
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+
+logging:
+  level:
+    org.springframework.ai: DEBUG
+    org.springframework.ai.chat.client.advisor.vectorstore: TRACE
+    org.springframework.web.client: DEBUG
+    com.kushal.policypilot: DEBUG 

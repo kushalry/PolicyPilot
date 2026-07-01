@@ -1,86 +1,109 @@
-# PolicyPilot — AI-Powered Insurance Policy Assistant
+# PolicyPilot
 
-A production-style RAG (Retrieval-Augmented Generation) chatbot built in Java, that answers questions about insurance policy documents. Ingest a policy PDF, ask questions in natural language, get cited answers grounded in the document — with fallback to typed function calls for live business data.
+AI-Powered Insurance Policy Assistant — Spring Boot 3 + Spring AI 1.0 + OpenAI + pgvector + Redis.
 
-**Stack:** Java 17 · Spring Boot 3.3 · Spring AI 1.0 GA · OpenAI GPT-4o-mini + text-embedding-3-small · PostgreSQL + pgvector · Redis · Docker Compose
-
-**Author:** Kushal Roy · [LinkedIn](https://www.linkedin.com/in/kusharoy) · [GitHub](https://github.com/kushalry)
-
----
-
-## What it does
-
-- **Ingests** insurance policy PDFs, chunks and embeds them, stores vectors in Postgres with an HNSW index
-- **Answers** natural-language questions using semantic retrieval + GPT-4o-mini synthesis
-- **Streams** responses over Server-Sent Events (SSE) for perceived-latency wins
-- **Remembers** conversations across turns via Redis-backed chat memory (30-min TTL)
-- **Calls** typed Java methods (`getClaimStatus`, `getPremiumQuote`) via LLM function-calling when live data is needed instead of retrieval
-
-The UI is at `http://localhost:8080` after boot — a minimal chat interface built to demonstrate the API without framework overhead.
+A production-style RAG application built to demonstrate end-to-end LLM integration in Java: PDF ingestion, semantic search, conversational memory, function calling, streaming, and prompt-injection defense.
 
 ## Architecture
-Client ──► ChatController
-│
-▼
-chatClient.prompt().user(q).call()
-│
-├──► QuestionAnswerAdvisor (RAG)
-│       ├──► embed query ──► OpenAI
-│       └──► similaritySearch ──► pgvector (HNSW, cosine)
-│
-├──► MessageChatMemoryAdvisor
-│       └──► load/store history ──► Redis (per sessionId)
-│
-├──► PolicyTools (function calling)
-│       └──► getClaimStatus, getPremiumQuote → typed Java methods
-│
-▼
-GPT-4o-mini ──► composed response
-│
-▼
-SSE stream to browser
 
-## Engineering highlights
-
-- **Chunk sanitization pipeline** — real PDFs contain null bytes and control characters that Postgres rejects. Cleaned at ingestion (`\u0000` stripping, control-char removal, whitespace normalization) before embedding.
-- **Similarity threshold tuning** — Spring AI's default of 0.7 rejected on-topic chunks. Dropped to 0.3 based on empirical score distribution from live queries.
-- **System prompt evolution** — first version treated "context" as documents only; refused conversational follow-ups even when history was loaded. Rewrote to acknowledge two sources (documents + conversation) and clarify refusal only when BOTH are unrelated.
-- **SSE parsing** — the browser's `EventSource` API strips one leading whitespace character per event per the W3C spec, which mangles LLM tokens (each has a leading space). Client uses `fetch` + `ReadableStream` + hand-written SSE parser to preserve whitespace.
-- **Observable memory bean** — `RedisChatMemory` instrumented with per-call logging on `.get()` and `.add()` to make silent bean-substitution failures visible.
-
-## Getting started
-
-Requirements: Java 17+, Docker + Compose, an OpenAI API key.
-
-```bash
-export OPENAI_API_KEY=sk-proj-...
-docker compose up -d
-./mvnw spring-boot:run \
-  -Dspring-boot.run.arguments="--spring.ai.openai.api-key=$OPENAI_API_KEY --spring.ai.openai.embedding.api-key=$OPENAI_API_KEY"
+```
+Client ──► ChatController ──► ChatClient (Spring AI)
+                                ├── QuestionAnswerAdvisor ──► pgvector (top-K retrieval)
+                                ├── MessageChatMemoryAdvisor ──► Redis (session history)
+                                ├── @Tool callbacks ──► PolicyTools (claim status, premium)
+                                └── ChatModel ──► OpenAI GPT-4o-mini
 ```
 
-Then:
+## Prerequisites
 
-1. Open `http://localhost:8080` — you'll see the chat UI
-2. Upload a policy PDF via `curl -F "file=@policy.pdf" http://localhost:8080/api/v1/documents`
-3. Ask questions in the UI
+- Java 17+
+- Docker + Docker Compose
+- An OpenAI API key (free tier works; total cost for end-to-end testing is under $0.10)
 
-### Demo queries
-"What's the medical coverage limit?"           → RAG retrieval
-"How do I file a claim?"                        → RAG retrieval
-"What's excluded from coverage?"                → multi-chunk synthesis
-"Summarize what you just told me."              → conversation memory
-"What's the status of my claim, policy P12345?" → function calling
-"How much for a Gold plan, age 35, 10 lakh?"    → function calling
-"Recipe for biryani?"                           → out-of-domain refusal
+## Run It
 
-## Trade-offs and known limitations
+```bash
+export OPENAI_API_KEY=sk-...
+docker compose up -d            # postgres+pgvector and redis
+./mvnw spring-boot:run
+```
 
-- **Follow-up retrieval degradation** — vector search on a raw pronoun-anchored question ("what about people over 60") pulls irrelevant chunks because the query is expanded only in the LLM prompt, not in the retriever query. Production fix is a query-rewriting step (`RewriteQueryTransformer` in Spring AI) that expands the follow-up to a standalone question before hitting the vector store. Trade-off is doubled LLM cost per turn.
-- **No re-ingestion dedup** — re-uploading the same PDF creates duplicate chunks. Production fix is content-hash-based idempotency on ingestion.
-- **No authorization on tools** — `getClaimStatus` will return the status of any policy number the LLM sends. Production requires verifying the sessionId's authenticated user actually owns the policy first.
-- **Redis chat memory is per-session** — no cross-session persistence, no summarization of long histories. Beyond ~20 turns, older turns get trimmed rather than summarized.
+Wait for `Started PolicyPilotApplication`. Pgvector's `vector_store` table is created automatically on first boot.
 
-## What I learned
+## Demo
 
-The interesting engineering isn't really "AI engineering" — it's distributed-systems engineering with a new kind of sink. Idempotency on ingestion, prompt engineering as real engineering, and observability of the seam between framework and model. The bugs that cost time were framework-mediated (silent bean substitution, protocol edge cases in SSE, similarity-threshold defaults tuned for wrong data) — the actual LLM behavior was the least surprising part.
+### 1. Ingest a policy PDF
+
+```bash
+curl -F "file=@/path/to/policy-wording.pdf" \
+     http://localhost:8080/api/v1/documents
+# → {"filename":"policy-wording.pdf","chunks":42,"status":"INGESTED"}
+```
+
+### 2. Ask a question (RAG)
+
+```bash
+curl -X POST http://localhost:8080/api/v1/chat \
+     -H 'Content-Type: application/json' \
+     -d '{"question":"What is covered under medical emergencies abroad?","sessionId":"demo-1"}'
+```
+
+### 3. Follow-up (memory in action)
+
+```bash
+curl -X POST http://localhost:8080/api/v1/chat \
+     -H 'Content-Type: application/json' \
+     -d '{"question":"And what is the deductible for that?","sessionId":"demo-1"}'
+```
+
+The second question resolves "that" from context — no need to repeat "medical emergencies."
+
+### 4. Trigger a tool call (function calling)
+
+```bash
+curl -X POST http://localhost:8080/api/v1/chat \
+     -H 'Content-Type: application/json' \
+     -d '{"question":"Whats the status of my claim, policy P12345?","sessionId":"demo-2"}'
+```
+
+The LLM emits a `getClaimStatus` tool call, Spring AI invokes `PolicyTools.getClaimStatus("P12345")`, and the model writes the reply on top of the structured result.
+
+### 5. Stream a response (SSE)
+
+```bash
+curl -N "http://localhost:8080/api/v1/chat/stream?question=Summarise+the+travel+plan&sessionId=demo-3"
+```
+
+### 6. Get a recommendation
+
+```bash
+curl -X POST http://localhost:8080/api/v1/recommend \
+     -H 'Content-Type: application/json' \
+     -d '{"age":32,"maritalStatus":"married","dependents":2,"incomeLakhs":18,"riskAppetite":"medium"}'
+```
+
+## Project Layout
+
+```
+src/main/java/com/kushal/policypilot/
+├── PolicyPilotApplication.java
+├── config/AiConfig.java             # ChatClient bean: prompt + advisors + tools
+├── controller/                       # 3 REST controllers
+├── service/
+│   ├── DocumentIngestionService.java # PDF → chunks → embeddings → pgvector
+│   ├── PolicyTools.java              # @Tool methods (function calling)
+│   ├── RecommendationService.java    # embedding-similarity recommendations
+│   └── RedisChatMemory.java          # ChatMemory impl over Redis
+└── dto/                              # Request/response records
+```
+
+## Switching to Anthropic Claude
+
+Spring AI's `ChatClient` is provider-agnostic. To swap OpenAI for Claude:
+
+1. Uncomment the `spring-ai-anthropic-spring-boot-starter` in `pom.xml`.
+2. In `application.yml`, replace the `spring.ai.openai.*` block with `spring.ai.anthropic.*` (api-key, model, etc).
+3. Done. Zero application-code changes.
+
+This portability is what makes Spring AI the right abstraction for Java teams.
+
